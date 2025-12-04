@@ -5,8 +5,8 @@
 #include <cstdlib>
 #include <cmath>
 
-#define TILE_ROWS 32
-#define TILE_COLS 8
+#define TILE_ROWS 8
+#define TILE_COLS 32
 
 // CPU matrix multiplication
 void matmul_cpu(float *A, float *B, float *C, int m, int k, int n) {
@@ -27,46 +27,50 @@ __global__ void matrixMultiplyOptimized(
     float* __restrict__ C,
     int M, int N, int K)
 {
+    const int tx = threadIdx.x;         // 0..TILE_COLS-1
+    const int ty = threadIdx.y;         // 0..TILE_ROWS-1
+
+    const int row = blockIdx.y * TILE_ROWS + ty;
+    const int col = blockIdx.x * TILE_COLS + tx;
+
     // Shared memory tiles
     __shared__ float sharedA[TILE_ROWS][TILE_COLS];
-    __shared__ float sharedB[TILE_ROWS][TILE_COLS];
-
-    // Thread and block indices
-    const int tx = threadIdx.x;
-    const int ty = threadIdx.y;
-    const int bx = blockIdx.x;
-    const int by = blockIdx.y;
-
-    // Global output position
-    const int row = by * TILE_ROWS + ty;
-    const int col = bx * TILE_COLS + tx;
+    __shared__ float sharedB[TILE_COLS][TILE_COLS];
 
     float sum = 0.0f;
 
-    // Number of tiles in K dimension
     const int numTiles = K / TILE_COLS;
 
-    for (int t = 0; t < numTiles; ++t) {
-        // Load tile from A: A[row * K + (t * TILE_COLS + tx)]
-        sharedA[ty][tx] = A[row * K + t * TILE_COLS + tx];
+    for (int t = 0; t < numTiles; t++)
+    {
+        int globalA_col = t * TILE_COLS + tx;
+        sharedA[ty][tx] = A[row * K + globalA_col];
 
-        // Load tile from B: B[(t * TILE_COLS + ty) * N + col]
-        sharedB[ty][tx] = B[(t * TILE_COLS + ty) * N + col];
+        const int LOADS_PER_THREAD = TILE_COLS / TILE_ROWS;
+
+//#pragma unroll
+        for (int i = 0; i < LOADS_PER_THREAD; i++) {
+            int brow = ty + i * TILE_ROWS;     // expand TY across extra rows
+            int bcol = tx;
+
+            int globalB_row = t * TILE_COLS + brow;
+            sharedB[brow][bcol] = B[globalB_row * N + col];
+        }
 
         __syncthreads();
 
-        // Compute: sum += A[row][k] * B[k][col]
-        #pragma unroll 8
-        for (int k = 0; k < TILE_COLS; ++k) {
+//#pragma unroll
+        for (int k = 0; k < TILE_COLS; k++) {
             sum += sharedA[ty][k] * sharedB[k][tx];
         }
 
         __syncthreads();
     }
 
-    // Write result (no bounds check — padded)
+    // Write result
     C[row * N + col] = sum;
 }
+
 
 // Function to measure execution time
 double get_time() {
@@ -176,10 +180,25 @@ int main(int argc, char* argv[]) {
     printf("Performing warm-up runs...\n");
     dim3 blockDim(TILE_COLS, TILE_ROWS);
     dim3 gridDim((N_pad + TILE_COLS - 1) / TILE_COLS, (M_pad + TILE_ROWS - 1) / TILE_ROWS);
+
+    auto launch_gpu_kernel = [&](const char* phase, int iteration) -> bool {
+        matrixMultiplyOptimized<<<gridDim, blockDim>>>(d_A, d_B, d_C, M_pad, N_pad, K_pad);
+        cudaError_t err = cudaDeviceSynchronize();
+        if (err != cudaSuccess) {
+            std::cerr << phase << " kernel failed at iteration " << iteration << ": "
+                      << cudaGetErrorString(err) << std::endl;
+            return false;
+        }
+        return true;
+    };
+
+    bool kernel_failed = false;
     for (int i = 0; i < 3; i++) {
         matmul_cpu(h_A, h_B, h_C_cpu, M, K, N);
-        matrixMultiplyOptimized<<<gridDim, blockDim>>>(d_A, d_B, d_C, M_pad, N_pad, K_pad);
-        cudaDeviceSynchronize();
+        if (!launch_gpu_kernel("Warm-up", i)) {
+            kernel_failed = true;
+            break;
+        }
     }
 
     // Benchmark CPU implementation
@@ -197,17 +216,22 @@ int main(int argc, char* argv[]) {
     // Benchmark GPU implementation
     printf("Benchmarking GPU implementation...\n");
     double gpu_total_time = 0.0;
+    int successful_gpu_runs = 0;
     for (int i = 0; i < 20; i++) {
         double start_time = get_time();
-        matrixMultiplyOptimized<<<gridDim, blockDim>>>(d_A, d_B, d_C, M_pad, N_pad, K_pad);
-        cudaDeviceSynchronize();
+        if (!launch_gpu_kernel("GPU benchmark", i)) {
+            kernel_failed = true;
+            break;
+        }
         double end_time = get_time();
         gpu_total_time += end_time - start_time;
+        ++successful_gpu_runs;
     }
-    double gpu_avg_time = gpu_total_time / 20.0;
+    double gpu_avg_time = (successful_gpu_runs > 0) ? (gpu_total_time / successful_gpu_runs) : 0.0;
     
     // Verify the top-left M×N block matches the CPU result (outside timing loop)
-    cudaMemcpy(h_C_gpu, d_C, size_C_padded, cudaMemcpyDeviceToHost);
+    if (!kernel_failed && successful_gpu_runs > 0) {
+        cudaMemcpy(h_C_gpu, d_C, size_C_padded, cudaMemcpyDeviceToHost);
     bool results_match = true;
     float tolerance = 1e-3f;
     for (int i = 0; i < M && results_match; ++i) {
@@ -223,12 +247,19 @@ int main(int argc, char* argv[]) {
     }
     if (results_match)
         std::cout << "CPU and GPU outputs match for the " << M << "×" << N << " block." << std::endl;
+    } else if (kernel_failed) {
+        std::cerr << "Skipping verification because GPU kernel failed.\n";
+    }
 
 
     // Print results
     printf("CPU average time: %f microseconds\n", (cpu_avg_time * 1e6f));
-    printf("GPU average time: %f microseconds\n", (gpu_avg_time * 1e6f));
-    printf("Speedup: %fx\n", cpu_avg_time / gpu_avg_time);
+    if (successful_gpu_runs > 0) {
+        printf("GPU average time: %f microseconds\n", (gpu_avg_time * 1e6f));
+        printf("Speedup: %fx\n", cpu_avg_time / gpu_avg_time);
+    } else {
+        std::cerr << "GPU benchmark failed; no valid timing to report.\n";
+    }
     
     // Free memory
     free(h_A);
