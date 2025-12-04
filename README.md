@@ -24,7 +24,7 @@ We start with the standard tiled implementation [tiled_matmul.cu](./tiled_matmul
 
 
 ## Overcome the Divergence
-Compared to the CPU version it has thousands of folds perf improvement. But is this the best we can do? Let's take a look at the code. CUDA executes code in warps (a group of 32 threads). Basically these threads execute SIMD (single instruction multiple data). This is all good if the code doesn't branches, but once different threads need to execute different branches, it diverges and causes inefficiencies. 
+Compared to the CPU version it has thousands of folds perf improvement. But is this the best we can do? Let's take a look at the code. CUDA executes code in warps (a group of 32 threads). Basically these threads execute SIMD (single instruction multiple data). This is all good if the code doesn't branch, but once different threads need to execute different branches, it diverges and causes inefficiencies. 
 
 ```cuda
         if (row < M && aCol < K) {
@@ -40,7 +40,7 @@ Compared to the CPU version it has thousands of folds perf improvement. But is t
         }
 ```
 
-We need to get rid of these branches in the kernel. The obvious solution is to pad the matrics to align with the TILE_SIZE. We did that in the [./tiled_matmul_padded.cu]
+We need to get rid of these branches in the kernel. The obvious solution is to pad the matrics to align with the TILE_SIZE. We did that in the [tiled_matmul_padded.cu](./tiled_matmul_padded.cu)
 
 ```cuda
     for (int tile = 0; tile < (K + TILE_SIZE - 1) / TILE_SIZE; ++tile) {
@@ -151,7 +151,7 @@ With rectangular tiles, we are combining the best of the two worlds. Optimal mem
 | G       | 1025 | 1025 | 1025 | 8x32      | Yes          | 758         |
 | G       | 1024 | 1024 | 1024 | 8x32      | Yes          | 727         |
 
-Looks like we have a winner. for x1025 matrics, we have dropped the runtime to 758ms. And if we look at the profiling details, we are achieving 92.97% occupancy. Block number are 6, which is falling between the recommended of 6 to 12 for my RTX 4090. SM Compute/Memory Throughput is at 95.46%. Everything is running as it should.
+Looks like we have a winner! for x1025 matrics, we have dropped the runtime to 758ms. And if we look at the profiling details, we are achieving 92.97% occupancy. Block number are 6, which is falling between the recommended of 6 to 12 for my RTX 4090. SM Compute/Memory Throughput is at 95.46%. Everything is running as it should.
 
 ![profile details](screenshots/8x32.jpg)
 
