@@ -4,8 +4,29 @@
 #include <cstring>
 #include <cstdlib>
 #include <cmath>
+#include <vector>
+#include <iomanip>
+#include <functional>
+#include <random>
+#include <numeric>
+#include <cassert>
+#include <cublas_v2.h>
 
-#define TILE_SIZE 16
+#define CHECK_CUDA(call) { \
+    cudaError_t status = call; \
+    if (status != cudaSuccess) { \
+        std::cerr << "CUDA error at line " << __LINE__ << ": " << cudaGetErrorString(status) << std::endl; \
+        exit(EXIT_FAILURE); \
+    } \
+}
+
+#define CHECK_CUBLAS(call) { \
+    cublasStatus_t status = call; \
+    if (status != CUBLAS_STATUS_SUCCESS) { \
+        fprintf(stderr, "cuBLAS error in %s:%d: %d\n", __FILE__, __LINE__, status); \
+        exit(EXIT_FAILURE); \
+    } \
+}
 
 // CPU matrix multiplication
 void matmul_cpu(float *A, float *B, float *C, int m, int k, int n) {
@@ -18,34 +39,6 @@ void matmul_cpu(float *A, float *B, float *C, int m, int k, int n) {
             C[i * n + j] = sum;
         }
     }
-}
-
-__global__ void matrixMultiplyOptimized(float* A, float* B, float* C, int M, int N, int K) {
-    __shared__ float sharedA[TILE_SIZE][TILE_SIZE];
-    __shared__ float sharedB[TILE_SIZE][TILE_SIZE];
-    
-    int bx = blockIdx.x, by = blockIdx.y;
-    int tx = threadIdx.x, ty = threadIdx.y;
-    
-    int row = by * TILE_SIZE + ty;
-    int col = bx * TILE_SIZE + tx;
-    
-    float sum = 0.0f;
-    
-    for (int tile = 0; tile < (K + TILE_SIZE - 1) / TILE_SIZE; ++tile) {
-        sharedA[ty][tx] = A[row * K + tile * TILE_SIZE + tx];
-        sharedB[ty][tx] = B[(tile * TILE_SIZE + ty) * N + col];
-        
-        __syncthreads();
-        
-        //#pragma unroll
-        for (int k = 0; k < TILE_SIZE; ++k)
-            sum += sharedA[ty][k] * sharedB[k][tx];
-        
-        __syncthreads();
-    }
-    
-    C[row * N + col] = sum;
 }
 
 // Function to measure execution time
@@ -62,9 +55,52 @@ void init_matrix(float *mat, int rows, int cols) {
     }
 }
 
+// New function for CUDA event-based timing
+float time_kernel(std::function<void()> kernel_func) {
+    cudaEvent_t start, stop;
+    float elapsed_time;
+
+    CHECK_CUDA(cudaEventCreate(&start));
+    CHECK_CUDA(cudaEventCreate(&stop));
+
+    CHECK_CUDA(cudaEventRecord(start));
+    kernel_func();
+    CHECK_CUDA(cudaEventRecord(stop));
+    CHECK_CUDA(cudaEventSynchronize(stop));
+
+    CHECK_CUDA(cudaEventElapsedTime(&elapsed_time, start, stop));
+
+    CHECK_CUDA(cudaEventDestroy(start));
+    CHECK_CUDA(cudaEventDestroy(stop));
+
+    return elapsed_time;
+}
+
+// Function to perform warmup and benchmark runs
+float benchmark_kernel(std::function<void()> kernel_func, int warmup_runs, int benchmark_runs) {
+    // Warmup runs
+    for (int i = 0; i < warmup_runs; ++i) {
+        kernel_func();
+    }
+    
+    // Benchmark runs
+    std::vector<float> times;
+    for (int i = 0; i < benchmark_runs; ++i) {
+        float time = time_kernel(kernel_func);
+        times.push_back(time);
+    }
+    
+    // Calculate average time
+    float avg_time = std::accumulate(times.begin(), times.end(), 0.000f) / benchmark_runs;
+    return avg_time;
+}
+
 int main(int argc, char* argv[]) {
     int M, N, K;
-    
+    const int warmup_runs = 3;
+    const int benchmark_runs = 20;
+    const int PADDED_TO = 16;
+
     // ——— Option 1: Command-line arguments (recommended) ———
     if (argc == 4) {
         M = std::atoi(argv[1]);
@@ -97,17 +133,16 @@ int main(int argc, char* argv[]) {
     }
 
     // ——— Print dimensions ———
-    std::cout << "Matrix multiplication: C[" << M << "×" << N << "] = A[" << M << "×" << K << "] × B[" << K << "×" << N << "]" << ", TILE_SIZE:" <<
-        TILE_SIZE << std::endl;
+    std::cout << "Matrix multiplication: C[" << M << "×" << N << "] = A[" << M << "×" << K << "] × B[" << K << "×" << N << "]" << std::endl;
 
     // Calculate matrix sizes in bytes (unpadded)
     size_t size_A = M * K * sizeof(float);
     size_t size_B = K * N * sizeof(float);
     size_t size_C = M * N * sizeof(float);
     
-    int M_pad = ((M + TILE_SIZE - 1) / TILE_SIZE) * TILE_SIZE;
-    int N_pad = ((N + TILE_SIZE - 1) / TILE_SIZE) * TILE_SIZE;
-    int K_pad = ((K + TILE_SIZE - 1) / TILE_SIZE) * TILE_SIZE;
+    int M_pad = ((M + PADDED_TO - 1) / PADDED_TO) * PADDED_TO;
+    int N_pad = ((N + PADDED_TO - 1) / PADDED_TO) * PADDED_TO;
+    int K_pad = ((K + PADDED_TO - 1) / PADDED_TO) * PADDED_TO;
     
     // Calculate padded matrix sizes
     size_t size_A_padded = (size_t)M_pad * K_pad * sizeof(float);
@@ -119,6 +154,10 @@ int main(int argc, char* argv[]) {
     float *h_A, *h_B, *h_C_cpu;
     float *h_A_padded, *h_B_padded, *h_C_gpu;
 
+    // CUDA setup
+    cublasHandle_t handle;
+    CHECK_CUBLAS(cublasCreate(&handle));
+    
     // Allocate host memory
     h_A = (float*)malloc(size_A);
     h_B = (float*)malloc(size_B);
@@ -154,46 +193,28 @@ int main(int argc, char* argv[]) {
     
     // Warm-up runs
     printf("Performing warm-up runs...\n");
-    dim3 blockDim(TILE_SIZE, TILE_SIZE);
-    dim3 gridDim((N_pad + TILE_SIZE - 1) / TILE_SIZE, (M_pad + TILE_SIZE - 1) / TILE_SIZE);
-    for (int i = 0; i < 3; i++) {
+    float alpha = 1.0f, beta = 0.0f;
+    for (int i = 0; i < 1; i++) {
         matmul_cpu(h_A, h_B, h_C_cpu, M, K, N);
-        matrixMultiplyOptimized<<<gridDim, blockDim>>>(d_A, d_B, d_C, M_pad, N_pad, K_pad);
+        CHECK_CUBLAS(cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N, N_pad, M_pad, K_pad, &alpha, d_B, N_pad, d_A, K_pad, &beta, d_C, N_pad));
         cudaDeviceSynchronize();
-    }
-
-    // Benchmark CPU implementation
-    printf("Benchmarking CPU implementation...\n");
-    double cpu_total_time = 0.0;
-    for (int i = 0; i < 20; i++) {
-        double start_time = get_time();
-        matmul_cpu(h_A, h_B, h_C_cpu, M, K, N);
-        double end_time = get_time();
-        cpu_total_time += end_time - start_time;
-    }
-    double cpu_avg_time = cpu_total_time / 20.0;
-    
+    }    
     
     // Benchmark GPU implementation
     printf("Benchmarking GPU implementation...\n");
-    double gpu_total_time = 0.0;
-    for (int i = 0; i < 20; i++) {
-        double start_time = get_time();
-        matrixMultiplyOptimized<<<gridDim, blockDim>>>(d_A, d_B, d_C, M_pad, N_pad, K_pad);
-        cudaDeviceSynchronize();
-        double end_time = get_time();
-        gpu_total_time += end_time - start_time;
-    }
-    double gpu_avg_time = gpu_total_time / 20.0;
+    float gpu_avg_time = benchmark_kernel([&]() {
+        CHECK_CUBLAS(cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N, N_pad, M_pad, K_pad, &alpha, d_B, N_pad, d_A, K_pad, &beta, d_C, N_pad));
+    }, warmup_runs, benchmark_runs);
+    std::cout << "CUDA kernel average time: " << gpu_avg_time << " ms" << std::endl;  
     
     // Verify the top-left M×N block matches the CPU result (outside timing loop)
-    cudaMemcpy(h_C_gpu, d_C, size_C_padded, cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_C_gpu, d_C, size_C, cudaMemcpyDeviceToHost);
     bool results_match = true;
     float tolerance = 1e-3f;
     for (int i = 0; i < M && results_match; ++i) {
         for (int j = 0; j < N; ++j) {
             float cpu_val = h_C_cpu[i * N + j];
-            float gpu_val = h_C_gpu[i * N_pad + j];
+            float gpu_val = h_C_gpu[i * N + j];
             if (std::fabs(cpu_val - gpu_val) > tolerance) {
                 std::cerr << "Mismatch at (" << i << "," << j << "): CPU=" << cpu_val << " GPU=" << gpu_val << std::endl;
                 results_match = false;
@@ -206,9 +227,7 @@ int main(int argc, char* argv[]) {
 
 
     // Print results
-    printf("CPU average time: %f microseconds\n", (cpu_avg_time * 1e6f));
-    printf("GPU average time: %f microseconds\n", (gpu_avg_time * 1e6f));
-    printf("Speedup: %fx\n", cpu_avg_time / gpu_avg_time);
+    printf("GPU average time: %f microseconds\n", (gpu_avg_time * 1e3f));
     
     // Free memory
     free(h_A);
@@ -220,6 +239,7 @@ int main(int argc, char* argv[]) {
     cudaFree(d_A);
     cudaFree(d_B);
     cudaFree(d_C);
+    CHECK_CUBLAS(cublasDestroy(handle));
 
     // Check for any CUDA errors
     cudaError_t error = cudaGetLastError();

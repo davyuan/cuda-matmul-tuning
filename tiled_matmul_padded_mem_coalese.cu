@@ -5,7 +5,7 @@
 #include <cstdlib>
 #include <cmath>
 
-#define TILE_ROWS 8
+#define TILE_ROWS 16
 #define TILE_COLS 32
 
 // CPU matrix multiplication
@@ -48,7 +48,7 @@ __global__ void matrixMultiplyOptimized(
 
         const int LOADS_PER_THREAD = TILE_COLS / TILE_ROWS;
 
-//#pragma unroll
+#pragma unroll
         for (int i = 0; i < LOADS_PER_THREAD; i++) {
             int brow = ty + i * TILE_ROWS;     // expand TY across extra rows
             int bcol = tx;
@@ -59,7 +59,7 @@ __global__ void matrixMultiplyOptimized(
 
         __syncthreads();
 
-//#pragma unroll
+#pragma unroll
         for (int k = 0; k < TILE_COLS; k++) {
             sum += sharedA[ty][k] * sharedB[k][tx];
         }

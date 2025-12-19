@@ -4,6 +4,11 @@
 #include <cstring>
 #include <cstdlib>
 #include <cmath>
+#include <vector>
+#include <iomanip>
+#include <functional>
+#include <random>
+#include <numeric>
 
 #define TILE_SIZE 32
 
