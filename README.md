@@ -1,4 +1,4 @@
-This repo is to iterate from ground up to build a custom MatMul kernel in CUDA to achieve cuBlas level performance. 
+## This repo is to iterate from ground up to build a custom MatMul kernel in CUDA to achieve cuBlas level performance. 
 
 The overall performance increase over the naive version of tiled MatMul is close to 12x folder. 
 
@@ -19,3 +19,5 @@ The [Second Part](README.Part%20II.md) covers
 - Double Buffering
 - Async memory copy
 - Triple Buffering
+
+I hope enjoy reading it, I certainly enjoyed writing it. 
