@@ -339,7 +339,6 @@ However we are not seeing much improvement in perf. While scratching my head, I 
 
 In my experiment, a flattened loader works better. 
 
-
 | CPU/GPU | M    | N    | K    | TILE_SIZE       | ROWS_PER_THREAD | MIN_TILE_SIZE | Vectorize | Double Buffer | Async Copy | Runtime(ms) |
 |---------|------|------|------|-----------------|-----------------|---------------|-----------|---------------|------------|-------------|
 | C       | 1024 | 1024 | 1024 | n/a             |                 |               |           |               |            | 2368233     |
