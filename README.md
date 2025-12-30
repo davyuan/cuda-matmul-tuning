@@ -20,4 +20,4 @@ The [Second Part](README.Part%20II.md) covers
 - Async memory copy
 - Triple Buffering
 
-I hope enjoy reading it, I certainly enjoyed writing it. 
+I hope you enjoy reading it, I certainly enjoyed writing it. 
